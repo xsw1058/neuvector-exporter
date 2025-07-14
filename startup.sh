@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/sh
 if [ -f /.venv/bin/activate ]; then
     source /.venv/bin/activate
 fi

@@ -54,14 +54,14 @@ test-image:
 	$(MAKE) build-image BUILD_ACTION="--platform=$(TARGET_PLATFORMS)"
 
 build-image: buildx-machine ## build (and load) the container image targeting the current platform.
-	$(IMAGE_BUILDER) build -f package/Dockerfile \
+	$(IMAGE_BUILDER) build --progress=plain -f package/Dockerfile \
 		--builder $(MACHINE) $(IMAGE_ARGS) \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t "$(IMAGE)" $(BUILD_ACTION) .
 	@echo "Built $(IMAGE)"
 
 
 push-image: buildx-machine
-	$(IMAGE_BUILDER) build -f package/Dockerfile \
+	$(IMAGE_BUILDER) build --progress=plain -f package/Dockerfile \
 		--builder $(MACHINE) $(IMAGE_ARGS) $(IID_FILE_FLAG) $(BUILDX_ARGS) \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --platform=$(TARGET_PLATFORMS) -t "$(REPO)/$(IMAGE_PREFIX)prometheus-exporter:$(TAG)" --push .
 	@echo "Pushed $(REPO)/$(IMAGE_PREFIX)prometheus-exporter:$(TAG)"

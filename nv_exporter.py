@@ -11,6 +11,7 @@
 # Imports
 # ----------------------------------------
 import argparse
+import base64
 import json
 import os
 import signal
@@ -33,8 +34,7 @@ ENABLE_ENFORCER_STATS = False
 # Functions
 # ----------------------------------------
 
-
-def _login(ctrl_url, ctrl_user, ctrl_pass):
+def _login(ctrl_url, ctrl_user, ctrl_pass, bootstrap_password):
     """
     Login to the api and get a token
     """
@@ -49,6 +49,27 @@ def _login(ctrl_url, ctrl_user, ctrl_pass):
     except requests.exceptions.RequestException as login_error:
         print(login_error)
         return -1
+
+    # print(response.text)
+    # print(response.status_code)
+    # maybe need to change password
+    if (response.status_code == 401 or response.status_code == 408) and bootstrap_password is not None:
+        print("login denied, try to change password.")
+        body = {"password": {"username": ctrl_user, "password": bootstrap_password, "new_password": ctrl_pass}}
+        try:
+            response = requests.post(ctrl_url + '/v1/auth',
+                                     headers=headers,
+                                     data=json.dumps(body),
+                                     verify=False,
+                                     timeout=10)
+        except requests.exceptions.RequestException as login_error:
+            print(login_error)
+            return -1
+
+        if response.status_code == 200:
+            print("change password success.")
+        else:
+            print("change password failed.")
 
     if response.status_code != 200:
         message = json.loads(response.text)["message"]
@@ -103,7 +124,7 @@ class NVApiCollector:
                 retry += 1
             else:
                 if response.status_code == 401 or response.status_code == 408:
-                    _login(self._url, self._user, self._pass)
+                    _login(self._url, self._user, self._pass,None)
                     retry += 1
                 else:
                     return response
@@ -582,12 +603,169 @@ class NVApiCollector:
                                   })
                 yield metric
 
+class AutoJoiner:
+    def __init__(self, join_token, join_token_url, endpoint, ctrl_user, ctrl_pass,
+                 pass_store_id, ctrl_join_addr,ctrl_join_port,ctrl_join_addr_prefix,ctrl_join_addr_suffix,join_interval):
+        self._endpoint = endpoint
+        self._user = ctrl_user
+        self._pass = ctrl_pass
+        self._url = "https://" + endpoint
+        self._join_token = join_token
+        self._join_interval = int(join_interval)
+
+        if join_token is not None and join_token_url is None:
+            token_str = base64.b64decode(JOIN_TOKEN).decode("utf-8")
+            server_addr = json.loads(token_str)["s"]
+            server_port = json.loads(token_str)["p"]
+            self._join_token_url = "https://" + server_addr + ":" + str(server_port) + "/join_token"
+            print(f"generate join_token_url={self._join_token_url}")
+        else:
+            self._join_token_url = join_token_url
+
+        if pass_store_id is not None and ctrl_join_addr is None:
+            self._ctrl_join_addr = ctrl_join_addr_prefix + pass_store_id + ctrl_join_addr_suffix
+            print(f"generate ctrl_join_addr={self._ctrl_join_addr}")
+        else:
+            self._ctrl_join_addr = ctrl_join_addr
+
+        if ctrl_join_addr is not None and pass_store_id is None:
+            s = str.removeprefix(ctrl_join_addr,ctrl_join_addr_prefix)
+            self._pass_store_id = str.removesuffix(s,ctrl_join_addr_suffix)
+            print(f"generate pass_store_id={self._pass_store_id}")
+        else:
+            self._pass_store_id = pass_store_id
+
+        self._ctrl_join_port = int(ctrl_join_port)
+
+    def get(self, path):
+        """
+        Function to perform the get operations
+        inside the class
+        """
+        retry = 0
+        while retry < 2:
+            try:
+                response = SESSION.get(self._url + path, verify=False)
+            except requests.exceptions.RequestException as response_error:
+                print(response_error)
+                retry += 1
+            else:
+                if response.status_code == 401 or response.status_code == 408:
+                    _login(self._url, self._user, self._pass,None)
+                    retry += 1
+                else:
+                    return response
+
+        print("Failed to GET " + path)
+    def need_to_join(self):
+        response = self.get('/v1/fed/member')
+        if response:
+            # Perform json load
+            sjson = json.loads(response.text)
+            # Check if the cluster is a federated master
+            if sjson['fed_role'] == "master" or sjson['fed_role'] == "joint":
+                return False
+        return True
+
+    def try_join(self):
+        while True:
+            if self._join_token is None and self._join_token_url is None:
+                print("join_token and join_token_url is None.")
+                return
+            if self._pass_store_id is None and self._ctrl_join_addr is None:
+                print("pass_store_id and ctrl_join_addr is None.")
+                return
+            if self.need_to_join():
+                print("---------------\nTrying join...")
+                if self._join_token is None and not self.update_join_token():
+                    print(f"join_token is None, and update join_token also failed, skip.")
+                    return
+                self.join_master()
+                time.sleep(self._join_interval)
+            else:
+                time.sleep(self._join_interval * 5)
+
+    def join_master(self):
+        body = {"name":self._pass_store_id,"join_token":self._join_token,"joint_rest_info":{"server":self._ctrl_join_addr,"port":self._ctrl_join_port}}
+        print(f"join request body: {json.dumps(body)}")
+        try:
+            response = SESSION.post(self._url + "/v1/fed/join",
+                                    data=json.dumps(body),
+                                    verify=False)
+        except requests.exceptions.RequestException as response_error:
+            print(f"join error: {response_error}")
+        else:
+            if response.status_code == 200:
+                token_str = base64.b64decode(self._join_token).decode("utf-8")
+                server_addr = json.loads(token_str)["s"]
+                server_port = json.loads(token_str)["p"]
+                print(f"join to {server_addr}:{server_port} success!!!!!!")
+                return 0
+            else:
+                print(f"join response body: {response.text}")
+                self.update_join_token()
+
+    def update_join_token(self):
+        try:
+            response = requests.get(self._join_token_url,
+                                     verify=False)
+            if response.status_code == 200:
+                join_token = json.loads(response.text)["context"]
+                token_str = base64.b64decode(join_token).decode("utf-8")
+                server_addr = json.loads(token_str)["s"]
+                server_port = json.loads(token_str)["p"]
+                print(f"get join_token from {self._join_token_url} success. parse result: server_addr is {server_addr}, server_port is {server_port}")
+                self._join_token = join_token
+                return True
+            else:
+                print(f"get join_token from {self._join_token_url} failed. status_code: {response.status_code}")
+        except Exception as e:
+            print(f"try get join_token from {self._join_token_url}. panic: {e}")
+        return False
 
 ENV_CTRL_API_SVC = "CTRL_API_SERVICE"
 ENV_CTRL_USERNAME = "CTRL_USERNAME"
 ENV_CTRL_PASSWORD = "CTRL_PASSWORD"
 ENV_EXPORTER_PORT = "EXPORTER_PORT"
 ENV_ENFORCER_STATS = "ENFORCER_STATS"
+# 以下环境变量为自动join主机群所需。
+# 初始密码，如果存在且首次登录401时，则尝试更改密码。注意：如果此处的初始密码为默认密码，则更改无效。
+ENV_CTRL_BOOTSTRAP_PASS = "CTRL_BOOTSTRAP_PASS"
+# JOIN_TOKEN 和 JOIN_TOKEN_URL至少存在一个，否则不会自动join主集群。
+ENV_JOIN_TOKEN = "JOIN_TOKEN"
+# JOIN_TOKEN_URL 必须以http://或https://开头，并包含完整路径。
+# 如果仅有JOIN_TOKEN，则会通过/join_token作为后缀构建JOIN_TOKEN_URL.
+ENV_JOIN_TOKEN_URL = "JOIN_TOKEN_URL"
+# 加入主机群时，PAAS_STORE_ID作为当前集群的名字。
+# PAAS_STORE_ID 和 ENV_CTRL_JOIN_ADDR至少提供一个
+ENV_PAAS_STORE_ID = "PAAS_STORE_ID"
+# 暂未使用
+ENV_CTRL_JOIN_NAME = "CTRL_JOIN_NAME"
+# 加入主机群时，CTRL_JOIN_ADDR和CTRL_JOIN_PORT作为当前集群的controller的对外访问地址提交给master。
+ENV_CTRL_JOIN_ADDR = "CTRL_JOIN_ADDR"
+ENV_CTRL_JOIN_PORT = "CTRL_JOIN_PORT"
+
+# 循环间隔
+ENV_JOIN_INTERVAL = "JOIN_INTERVAL"
+# 前缀
+ENV_CTRL_JOIN_ADDR_PREFIX = "CTRL_JOIN_ADDR_PREFIX"
+# 后缀
+ENV_CTRL_JOIN_ADDR_SUFFIX = "CTRL_JOIN_ADDR_SUFFIX"
+
+# test ENV
+# os.environ[ENV_EXPORTER_PORT] = "9003"
+# os.environ[ENV_CTRL_API_SVC] = "192.168.8.148:10443"
+# os.environ[ENV_CTRL_USERNAME] = "admin"
+# os.environ[ENV_CTRL_PASSWORD] = "admin"
+# os.environ[ENV_CTRL_BOOTSTRAP_PASS] = "admin"
+# os.environ[ENV_JOIN_TOKEN] = "eyJzIjoidTIyMDRhLnhzdy5jb20iLCJwIjo0NDMsInQiOiJFWWxqRk0vbDJpellHRmtoTklERXkxc1MwQklJcnRKdmpERUNWQjB5UUE5SFRIYjI5UzNXRVFabFdLVHJ1eDQ9In0="
+# os.environ[ENV_JOIN_TOKEN_URL] = "http://u2204a.xsw.com/join_token"
+# os.environ[ENV_PAAS_STORE_ID] = "u2204b"
+# os.environ[ENV_CTRL_JOIN_ADDR_PREFIX] = ""
+# os.environ[ENV_CTRL_JOIN_ADDR_SUFFIX] = ".xsw1.com"
+# os.environ[ENV_JOIN_INTERVAL] = "3"
+# os.environ[ENV_CTRL_JOIN_ADDR] = "u2204b.xsw.com"
+# os.environ[ENV_CTRL_JOIN_PORT] = "xsw443"
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(description='NeuVector command line.')
@@ -640,8 +818,77 @@ if __name__ == '__main__':
         except NameError:
             ENABLE_ENFORCER_STATS = False
 
+    if ENV_CTRL_BOOTSTRAP_PASS in os.environ:
+        CTRL_BOOTSTRAP_PASS = os.environ.get(ENV_CTRL_BOOTSTRAP_PASS)
+    else:
+        CTRL_BOOTSTRAP_PASS = None
+
+    if ENV_JOIN_TOKEN_URL in os.environ:
+        JOIN_TOKEN_URL = os.environ.get(ENV_JOIN_TOKEN_URL)
+    else:
+        JOIN_TOKEN_URL = None
+
+    if ENV_JOIN_TOKEN in os.environ:
+        JOIN_TOKEN = os.environ.get(ENV_JOIN_TOKEN)
+    else:
+        JOIN_TOKEN = None
+
+    if ENV_PAAS_STORE_ID in os.environ:
+        PAAS_STORE_ID = os.environ.get(ENV_PAAS_STORE_ID)
+    else:
+        PAAS_STORE_ID = None
+
+    if ENV_CTRL_JOIN_ADDR in os.environ:
+        CTRL_JOIN_ADDR = os.environ.get(ENV_CTRL_JOIN_ADDR)
+    else :
+        CTRL_JOIN_ADDR = None
+
+    if ENV_CTRL_JOIN_PORT in os.environ:
+        CTRL_JOIN_PORT = os.environ.get(ENV_CTRL_JOIN_PORT)
+    else:
+        CTRL_JOIN_PORT = 443
+
+    if ENV_CTRL_JOIN_ADDR_PREFIX in os.environ:
+        CTRL_JOIN_ADDR_PREFIX = os.environ.get(ENV_CTRL_JOIN_ADDR_PREFIX)
+    else:
+        CTRL_JOIN_ADDR_PREFIX = "cn-wukong-"
+
+    if ENV_CTRL_JOIN_ADDR_SUFFIX in os.environ:
+        CTRL_JOIN_ADDR_SUFFIX = os.environ.get(ENV_CTRL_JOIN_ADDR_SUFFIX)
+    else:
+        CTRL_JOIN_ADDR_SUFFIX = ".mcd.store"
+
+    if ENV_JOIN_INTERVAL in os.environ:
+        JOIN_INTERVAL = os.environ.get(ENV_JOIN_INTERVAL)
+    else:
+        JOIN_INTERVAL = 30
+
+    print(f"config:\n PORT={PORT}\n CTRL_SVC={CTRL_SVC}\n CTRL_USER={CTRL_USER}\n CTRL_PASS={CTRL_PASS[0:1]}*\n "
+          f"CTRL_BOOTSTRAP_PASS={CTRL_BOOTSTRAP_PASS}\n "
+          f"JOIN_TOKEN_URL={JOIN_TOKEN_URL}\n "
+          f"JOIN_TOKEN={JOIN_TOKEN}\n "
+          f"PAAS_STORE_ID={PAAS_STORE_ID}\n "
+          f"CTRL_JOIN_ADDR={CTRL_JOIN_ADDR}\n "
+          f"CTRL_JOIN_PORT={CTRL_JOIN_PORT}\n "
+          f"CTRL_JOIN_ADDR_PREFIX={CTRL_JOIN_ADDR_PREFIX}\n "
+          f"CTRL_JOIN_ADDR_SUFFIX={CTRL_JOIN_ADDR_SUFFIX}\n "
+          f"JOIN_INTERVAL={JOIN_INTERVAL}\n ")
+
+    joiner = None
+
+    # 判断是否启用自动加入
+    if PAAS_STORE_ID is None and CTRL_JOIN_ADDR is None:
+        print("No PAAS_STORE_ID or CTRL_JOIN_ADDR specified. do not auto join.")
+    elif JOIN_TOKEN is None and JOIN_TOKEN_URL is None:
+        print("No JOIN_TOKEN or JOIN_TOKEN_URL specified. do not auto join.")
+    else:
+        joiner = AutoJoiner(JOIN_TOKEN, JOIN_TOKEN_URL, CTRL_SVC, CTRL_USER, CTRL_PASS,
+                            PAAS_STORE_ID, CTRL_JOIN_ADDR, CTRL_JOIN_PORT,CTRL_JOIN_ADDR_PREFIX,CTRL_JOIN_ADDR_SUFFIX,JOIN_INTERVAL)
+
     # Login and get token
-    if _login("https://" + CTRL_SVC, CTRL_USER, CTRL_PASS) < 0:
+    if _login("https://" + CTRL_SVC, CTRL_USER, CTRL_PASS,CTRL_BOOTSTRAP_PASS) < 0:
+        print(f"login failed: {CTRL_SVC}, exit after 300s.")
+        time.sleep(300)
         sys.exit(1)
 
     print("Start exporter server ...")
@@ -653,4 +900,6 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, COLLECTOR.sigterm_handler)
 
     while True:
+        if joiner :
+            joiner.try_join()
         time.sleep(30)
