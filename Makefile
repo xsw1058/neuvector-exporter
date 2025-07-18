@@ -38,7 +38,7 @@ endif
 TARGET_PLATFORMS ?= linux/amd64,linux/arm64
 STAGE_DIR=stage
 REPO ?= neuvector
-IMAGE = $(REPO)/prometheus-exporter:$(TAG)
+IMAGE = $(REPO)/auto-join:$(TAG)
 BUILD_ACTION = --load
 
 .PHONY: all build test copy_adpt
@@ -63,5 +63,5 @@ build-image: buildx-machine ## build (and load) the container image targeting th
 push-image: buildx-machine
 	$(IMAGE_BUILDER) build --progress=plain -f package/Dockerfile \
 		--builder $(MACHINE) $(IMAGE_ARGS) $(IID_FILE_FLAG) $(BUILDX_ARGS) \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --platform=$(TARGET_PLATFORMS) -t "$(REPO)/$(IMAGE_PREFIX)prometheus-exporter:$(TAG)" --push .
-	@echo "Pushed $(REPO)/$(IMAGE_PREFIX)prometheus-exporter:$(TAG)"
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --platform=$(TARGET_PLATFORMS) -t "$(REPO)/$(IMAGE_PREFIX)auto-join:$(TAG)" --push .
+	@echo "Pushed $(REPO)/$(IMAGE_PREFIX)auto-join:$(TAG)"
