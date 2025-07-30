@@ -10,6 +10,7 @@
 # ----------------------------------------
 import argparse
 import base64
+import datetime
 import json
 import os
 import signal
@@ -161,29 +162,22 @@ class AutoJoiner:
         return True
 
     def try_join(self):
-        for i in range(self._max_retry):
-            if self._join_token is None and self._join_token_url is None:
-                print("join_token and join_token_url is None.")
-                sys.exit(1)
-            if self._pass_store_id is None and self._ctrl_join_addr is None:
-                print("pass_store_id and ctrl_join_addr is None.")
-                sys.exit(1)
+        for retry in range(1,self._max_retry+1):
             if self.need_to_join():
-                print("---------------\nTrying join...")
+                print(f"------\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} attempt join {retry}/{self._max_retry}")
                 if self._join_token is None and not self.update_join_token():
-                    print(f"join_token is None, and update join_token also failed, skip.")
-                    return
+                    time.sleep(self._join_interval)
+                    continue
                 self.join_master()
-                time.sleep(self._join_interval)
             else:
                 sys.exit(0)
-            if i == int(self._max_retry) - 1:
-                print(f"join retry {i + 1} failed. exiting.")
-                sys.exit(1)
+
+        print(f"join retry {self._max_retry} failed. exiting.")
+        sys.exit(1)
 
     def join_master(self):
         body = {"name":self._pass_store_id,"join_token":self._join_token,"joint_rest_info":{"server":self._ctrl_join_addr,"port":self._ctrl_join_port}}
-        print(f"join request body: {json.dumps(body)}")
+        print(f"request body: {json.dumps(body)}")
         try:
             response = SESSION.post(self._url + "/v1/fed/join",
                                     data=json.dumps(body),
@@ -198,7 +192,7 @@ class AutoJoiner:
                 print(f"join to {server_addr}:{server_port} success!!!!!!")
                 return 0
             else:
-                print(f"join response body: {response.text}")
+                print(f"response body: {response.text}\njoin failed. retry after update join token")
                 self.update_join_token()
 
     def update_join_token(self):
@@ -210,11 +204,16 @@ class AutoJoiner:
                 token_str = base64.b64decode(join_token).decode("utf-8")
                 server_addr = json.loads(token_str)["s"]
                 server_port = json.loads(token_str)["p"]
-                print(f"get join_token from {self._join_token_url} success. parse result: server_addr is {server_addr}, server_port is {server_port}")
+                print(f"new join_token: {join_token}"
+                      f" -> server_addr={server_addr}, server_port={server_port}.")
                 self._join_token = join_token
                 return True
             else:
-                print(f"get join_token from {self._join_token_url} failed. status_code: {response.status_code}")
+                print(f"get join_token failed.\n"
+                      f"join_token_url: {self._join_token_url}\n"
+                      f"response.status_code: {response.status_code}\n"
+                      f"response.text: {response.text}\n"
+                      f"response.headers: {response.headers}")
         except Exception as e:
             print(f"try get join_token from {self._join_token_url}. panic: {e}")
         return False
@@ -250,17 +249,17 @@ ENV_JOIN_INTERVAL = "JOIN_INTERVAL"
 ENV_MAX_RETRY = "MAX_RETRY"
 
 # test ENV
-# os.environ[ENV_CTRL_API_SVC] = "192.168.8.150:10443"
+# os.environ[ENV_CTRL_API_SVC] = "192.168.8.149:10443"
 # os.environ[ENV_CTRL_USERNAME] = "admin"
-# os.environ[ENV_CTRL_PASSWORD] = "FBrSTVnBbPY6Ezdigj"
+# os.environ[ENV_CTRL_PASSWORD] = "meRYADKoGU4JHJ7TQR"
 # os.environ[ENV_CTRL_BOOTSTRAP_PASS] = "admin"
-# os.environ[ENV_JOIN_TOKEN] = "eyJzIjoidTIyMDRhLnhzdy5jb20iLCJwIjo0NDMsInQiOiJFWWxqRk0vbDJpellHRmtoTklERXkxc1MwQklJcnRKdmpERUNWQjB5UUE5SFRIYjI5UzNXRVFabFdLVHJ1eDQ9In0="
-# os.environ[ENV_JOIN_TOKEN_URL] = "http://u2204a.xsw.com/join_token"
+# os.environ[ENV_JOIN_TOKEN] = "eyJzIjoiY24td3Vrb25nLXJrZS11YXQwMS5tY2QuY2xvdWQiLCJwIjo0NDMsInQiOiJubkRKZ2JRY2RHdldaTXhqZk9YM2ZWS0w5cmpUU3o0c2plRU5CdU1FU00zM01taWNveXhmYnR4ZS9jdlhRQjg9In0="
+# os.environ[ENV_JOIN_TOKEN_URL] = "https://cn-wukong-rke-uat01.mcd.cloud:443/join_token"
 # os.environ[ENV_PAAS_STORE_ID] = "u2204b"
 # os.environ[ENV_CTRL_JOIN_ADDR_PREFIX] = ""
 # os.environ[ENV_CTRL_JOIN_ADDR_SUFFIX] = ".xsw1.com"
 # os.environ[ENV_JOIN_INTERVAL] = "2"
-# os.environ[ENV_MAX_RETRY] = "5"
+# os.environ[ENV_MAX_RETRY] = "10"
 # os.environ[ENV_CTRL_JOIN_ADDR] = "u2204b.xsw.com"
 # os.environ[ENV_CTRL_JOIN_PORT] = "443"
 
@@ -334,7 +333,7 @@ if __name__ == '__main__':
     if ENV_CTRL_JOIN_ADDR_PREFIX in os.environ:
         CTRL_JOIN_ADDR_PREFIX = os.environ.get(ENV_CTRL_JOIN_ADDR_PREFIX)
     else:
-        CTRL_JOIN_ADDR_PREFIX = "cn-wukong-"
+        CTRL_JOIN_ADDR_PREFIX = "cn-wukong-r"
 
     if ENV_CTRL_JOIN_ADDR_SUFFIX in os.environ:
         CTRL_JOIN_ADDR_SUFFIX = os.environ.get(ENV_CTRL_JOIN_ADDR_SUFFIX)
@@ -349,7 +348,7 @@ if __name__ == '__main__':
     if ENV_MAX_RETRY in os.environ:
         MAX_RETRY = os.environ.get(ENV_MAX_RETRY)
     else:
-        MAX_RETRY = 360
+        MAX_RETRY = 30
 
     print(f"config:\n CTRL_SVC={CTRL_SVC}\n CTRL_USER={CTRL_USER}\n CTRL_PASS={CTRL_PASS[0:1]}*\n "
           f"CTRL_BOOTSTRAP_PASS={CTRL_BOOTSTRAP_PASS}\n "
@@ -360,7 +359,8 @@ if __name__ == '__main__':
           f"CTRL_JOIN_PORT={CTRL_JOIN_PORT}\n "
           f"CTRL_JOIN_ADDR_PREFIX={CTRL_JOIN_ADDR_PREFIX}\n "
           f"CTRL_JOIN_ADDR_SUFFIX={CTRL_JOIN_ADDR_SUFFIX}\n "
-          f"JOIN_INTERVAL={JOIN_INTERVAL}\n ")
+          f"JOIN_INTERVAL={JOIN_INTERVAL}\n "
+          f"MAX_RETRY={MAX_RETRY}\n ")
 
     # check var
     if PAAS_STORE_ID is None and CTRL_JOIN_ADDR is None:
